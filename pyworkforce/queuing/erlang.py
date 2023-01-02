@@ -5,116 +5,133 @@ from joblib import Parallel, delayed
 
 class ErlangC:
     """
-    Computes the number of positions required to attend a number of transactions in a
-    queue system based on erlangc.rst. Implementation inspired on:
-    https://lucidmanager.org/data-science/call-centre-workforce-planning-erlang-c-in-r/
-
-    Parameters
-    ----------
-    transactions: float,
-        The number of total transactions that comes in an interval.
-    aht: float,
-        Average handling time of a transaction (minutes).
-    asa: float,
-        The required average speed of answer (minutes).
-    interval: int,
-        Interval length (minutes) where the transactions come in
-    shrinkage: float,
-        Percentage of time that an operator unit is not available.
+    Use the Erlang C formula to compute number of required positions in a queue.
+    
+    This is a modified version of the ErlangC class in the pyworkforce package.
+    Inspiration for that package came from
+    https://lucidmanager.org/data-science/call-centre-workforce-planning-erlang-c-in-r/.
     """
 
     def __init__(self, transactions: float, aht: float, asa: float,
-                 interval: int, shrinkage=0.0,
-                 **kwargs):
+                 interval: int, shrinkage: float = 0.0):
+        """
+        Instantiate an ErlangC object.
 
+        Args:
+            transactions (float):   number of transactions anticipated
+            aht (float):            average transaction handle time, in minutes
+            asa (float):            average speed of answer, in minutes
+            interval (float):       length of interval, in minutes
+            shrinkage (float):      proportion of interval during which
+                                    transactions cannot be processed
+        """
+        # validate input
         if transactions <= 0:
-            raise ValueError("transactions can't be smaller or equals than 0")
+            raise ValueError("Number of transactions must be positive.")
 
         if aht <= 0:
-            raise ValueError("aht can't be smaller or equals than 0")
+            raise ValueError("Average handle time must be positive.")
 
         if asa <= 0:
-            raise ValueError("asa can't be smaller or equals than 0")
+            raise ValueError("Average speed of answer must be positive.")
 
         if interval <= 0:
-            raise ValueError("interval can't be smaller or equals than 0")
+            raise ValueError("Length of interval must be positive.")
 
         if shrinkage < 0 or shrinkage >= 1:
-            raise ValueError("shrinkage must be between in the interval [0,1)")
-
+            raise ValueError("Shrinkage must be in the interval [0,1).")
+        
+        # set parameters
         self.n_transactions = transactions
         self.aht = aht
         self.interval = interval
         self.asa = asa
+
+        # intensity = number of work minutes received each minute
         self.intensity = (self.n_transactions / self.interval) * self.aht
+
         self.shrinkage = shrinkage
 
-    def waiting_probability(self, positions: int, scale_positions: bool = False):
+    def waiting_probability(self, positions: float):
         """
-        Returns the probability of waiting in the queue
+        Compute probability that a transaction will wait in the queue.
 
-        Parameters
-        ----------
-        positions: int,
-            The number of positions to attend the transactions.
-        scale_positions: bool, default=False
-            Set it to True if the positions were calculated using shrinkage.
+        This method is different from its counterpart in the pyworkforce package
+        in the following ways:
 
+            1)  scale_positions has been removed (it is only ever False)
+
+            2)  positions is now a float rather than an int (allows for more
+                precise staffing level calculations)
+
+            3)  uses ceil rather than floor to determine effective positions
+
+        Args:
+            positions (float):  number of positions
+
+        Returns:    expected waiting probability for a transaction entering the
+                    system
         """
+        # Erlang formula requires an integer value for positions
+        effective_positions = ceil(positions)
 
-        if scale_positions:
-            productive_positions = floor((1 - self.shrinkage) * positions)
-        else:
-            productive_positions = positions
-
+        # compute the inverse of the Erlang B value
         erlang_b_inverse = 1
-        for position in range(1, productive_positions + 1):
+        for position in range(1, effective_positions + 1):
             erlang_b_inverse = 1 + (erlang_b_inverse * position / self.intensity)
 
+        # take reciprocal of Erlang B inverse to get Erlang B value
         erlang_b = 1 / erlang_b_inverse
-        return productive_positions * erlang_b / (productive_positions - self.intensity * (1 - erlang_b))
 
-    def service_level(self, positions: int, scale_positions: bool = False):
+        # apply formula to compute waiting probability
+        return effective_positions * erlang_b / (effective_positions - self.intensity * (1 - erlang_b))
+
+    def service_level(self, positions: float):
         """
-        Returns the expected service level given a number of positions
+        Compute the expected service level for a number of positions.
 
-        Parameters
-        ----------
+        Service level is defined as the proportion of transactions that are in
+        the queue for no more than asa minutes before being processed. This
+        method is different from its counterpart in the pyworkforce in the
+        following ways:
 
-        positions: int,
-            The number of positions attending.
-        scale_positions: bool, default = False
-            Set it to True if the positions were calculated using shrinkage.
+            1)  scale_positions has been removed (it is only ever False)
 
+            2)  positions is now a float rather than an int (allows for more
+                precise staffing level calculations)
+
+        Args:
+            positions (float):  number of positions
+
+        Returns:    expected service level
         """
-        if scale_positions:
-            productive_positions = floor((1 - self.shrinkage) * positions)
-        else:
-            productive_positions = positions
+        # compute components of service level formula
+        probability_wait = self.waiting_probability(positions)
+        exponential = exp(-(positions - self.intensity) * (self.asa / self.aht))
 
-        probability_wait = self.waiting_probability(productive_positions, scale_positions=False)
-        exponential = exp(-(productive_positions - self.intensity) * (self.asa / self.aht))
+        # ensure that a negative service level is not returned
         return max(0, 1 - (probability_wait * exponential))
 
-    def achieved_occupancy(self, positions: int, scale_positions: bool = False):
+    def achieved_occupancy(self, positions: float):
         """
-        Returns the expected occupancy of positions
+        Compute the occupancy for a number of positions.
 
-        Parameters
-        ----------
+        Occupancy is defined as the proportion of time that resources spend
+        actively processing transactions. Informally, occupancy is the ratio of
+        work minutes to people minutes. This method is different from its
+        counterpart in the pyworkforce package in the following ways:
 
-        positions: int,
-            The number of raw positions
-        scale_positions: bool, default=False
-            Set it to True if the positions were calculated using shrinkage.
+            1)  scale_positions has been removed (it is only ever False)
 
+            2)  positions is now a float rather than an int (allows for more
+                precise staffing level calculations)
+
+        Args:
+            positions:  number of positions
+
+        Returns:    achieved occupancy
         """
-        if scale_positions:
-            productive_positions = floor((1 - self.shrinkage) * positions)
-        else:
-            productive_positions = positions
-
-        return self.intensity / productive_positions
+        return self.intensity / positions
 
     def required_positions(self, service_level: float, max_occupancy: float = 1.0):
         """
